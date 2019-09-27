@@ -34,19 +34,19 @@ module ForkingTestRunner
 
       # run all the tests
       results = with_lock do |lock|
-        Parallel.map_with_index(test_groups, in_processes: parallel || 0) do |tests, env_index|
+        Parallel.map_with_index(test_groups, in_processes: parallel || 0) do |test_group, env_index|
           if parallel
             ENV["TEST_ENV_NUMBER"] = (env_index == 0 ? '' : (env_index + 1).to_s) # NOTE: does not support first_is_1 option
           end
 
           reraise_clean_ar_error { load_test_env }
 
-          tests.map do |file, expected|
+          test_group.map do |file, expected|
             print_started file unless parallel
             result = [file, expected, *benchmark { run_test(file) }]
             sync_stdout lock do
               print_started file if parallel
-              print_finished *result
+              print_finished(*result)
             end
             result
           end
@@ -84,6 +84,11 @@ module ForkingTestRunner
 
     private
 
+    def runner_id
+      n = ENV["TEST_ENV_NUMBER"]
+      (n && n != "") ? n : "1"
+    end
+
     def with_lock(&block)
       return yield unless @options.fetch(:parallel)
       Tempfile.open"forking-test-runner-lock", &block
@@ -93,6 +98,7 @@ module ForkingTestRunner
       return yield unless @options.fetch(:parallel)
       begin
         lock.flock(File::LOCK_EX)
+        puts "#{runner_id} has the lock #{lock}"
         yield
       ensure
         lock.flock(File::LOCK_UN)
@@ -100,7 +106,7 @@ module ForkingTestRunner
     end
 
     def print_started(file)
-      puts "#{CLEAR} >>> #{file}"
+      puts "#{CLEAR} #{runner_id}/#{@options.fetch(:parallel)} >>> #{file}"
     end
 
     def print_finished(file, expected, time, success, stdout)
@@ -111,9 +117,10 @@ module ForkingTestRunner
         puts "Time: expected #{expected.round(2)}, actual #{time.round(2)}"
       end
 
-      if !success || !@options.fetch(:quiet)
-        puts "#{CLEAR} <<< #{file} ---- #{success ? "OK" : "Failed"}"
-      end
+      message = "#{CLEAR} #{runner_id}/#{@options.fetch(:parallel)} <<< #{file} ---- #{success ? "OK" : "Failed"}"
+      message += " ---- exp/actual: #{expected.round(2)}/#{time.round(2)}" if @options.fetch(:runtime_log)
+
+      puts message
     end
 
     def colorize(green, string)
@@ -206,7 +213,7 @@ module ForkingTestRunner
       end
 
       # needs to be done outside of the rescue block to avoid inheriting the cause
-      raise RuntimeError, "Re-raised error from test helper: #{e.message}", e.backtrace if e
+      raise RuntimeError, "#{runner_id}: Re-raised error from test helper: #{e.message}", e.backtrace if e
     end
 
     def load_test_helper
